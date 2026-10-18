@@ -49,10 +49,12 @@ def _variants(v: float) -> set[float]:
 
 
 def allowed_numbers(*, question: str, history: list[str], facts: list[Fact], chunks: list[Chunk],
-                    derived: list[dict], sql_rows: list[dict]) -> set[float]:
+                    derived: list[dict], sql_rows: list[dict], extra_texts: list[str] | None = None) -> set[float]:
+    """Every number the writer was legitimately shown. `extra_texts` = catalogue metadata in the prompt."""
     allowed: set[float] = set()
-    for text in [question, *history, *(c.text for c in chunks)]:
+    for text in [question, *history, *(c.text for c in chunks), *(extra_texts or [])]:
         allowed.update(extract_numbers(text))
+    allowed.update(float(c.page) for c in chunks)
     for f in facts:
         allowed.update(_variants(f.value))
         allowed.update({float(f.period_start), float(f.period_end), float(f.page)})

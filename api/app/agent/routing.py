@@ -19,8 +19,11 @@ COMPARE_RE = re.compile(
     r"which report|which source|better source|recommend)\b",
     re.IGNORECASE,
 )
-FACT_RE = re.compile(r"\b(market size|size|worth|valued?|revenue|cagr|growth|share|forecast|figure|say)\b",
-                     re.IGNORECASE)
+FACT_RE = re.compile(
+    r"\b(market size|size|worth|valued?|revenue|cagr|growth|share|forecast|figure|says?|summari[sz]e|summary|"
+    r"overview|tell me about|explain|describe|drivers?|driving|trends?|outlook)\b",
+    re.IGNORECASE,
+)
 REPORT_ID_RE = re.compile(r"\bR-\d{3}\b", re.IGNORECASE)
 VALID_ROUTES = {"factual", "comparison", "calculation", "aggregate", "out_of_scope", "unsafe"}
 

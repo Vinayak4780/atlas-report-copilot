@@ -62,7 +62,7 @@ class CopilotService:
             "trace": [],
         })
 
-        sql = state.get("sql") or {}
+        sql = state.get("sql_result") or {}
         resp = ChatResponse(
             request_id=request_id,
             client_id=client["id"],

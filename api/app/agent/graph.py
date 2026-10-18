@@ -31,6 +31,7 @@ from app.tools.conflicts import detect_conflicts
 from app.tools.sql_tool import run_sql_tool
 
 logger = logging.getLogger(__name__)
+POSITIVE_REASONS = ("Figures come from", "Answer computed", "Answer based on")
 
 
 class AgentState(TypedDict, total=False):
@@ -64,14 +65,14 @@ class AgentState(TypedDict, total=False):
     calc_notes: list
     calc_status: str
     fixed_answer: str
-    sql: dict
+    sql_result: dict
     # writing / checking
     draft: str
     writer_attempts: int
     writer_feedback: str
     retry_writer: bool
     llm_degraded: bool
-    critic: dict
+    critic_report: dict
     confidence: float
     confidence_reasons: list
     escalation_kind: str
@@ -113,7 +114,8 @@ class AtlasAgent:
         g.add_conditional_edges("router", self._after_router, {"refuse": "refuse", "entitlement": "entitlement"})
         g.add_conditional_edges("entitlement", self._after_entitlement,
                                 {"refuse": "refuse", "sql": "sql", "retrieve": "retrieve"})
-        g.add_edge("retrieve", "evidence")
+        g.add_conditional_edges("retrieve", lambda s: "refuse" if s["route"] == "out_of_scope" else "evidence",
+                                {"refuse": "refuse", "evidence": "evidence"})
         g.add_conditional_edges("evidence", self._after_evidence, {"calculator": "calculator", "writer": "writer"})
         g.add_conditional_edges("calculator", self._after_calculator,
                                 {"writer": "writer", "escalate": "escalate", "finalize": "finalize"})
@@ -253,6 +255,14 @@ class AtlasAgent:
         query = q if s.get("markets_explicit") or not s.get("history") else f"{s['history'][-1]} {q}"
         page = page_reference(q) if s.get("mentioned") else None
         chunks: list[Chunk] = self.store.search(query, s["scope_ids"], self.s.retrieval_top_k, page=page)
+        anchored = s.get("markets") or s.get("mentioned")
+        if not anchored and (not chunks or chunks[0].score < self.s.min_relevance):
+            best = chunks[0].score if chunks else 0.0
+            log_event(logger, "retrieval_below_floor", request_id=s["request_id"], best=best)
+            if s.get("route_source") == "default":
+                # Neither the heuristics nor the LLM could classify it and nothing in the library matches.
+                return {"chunks": [], "route": "out_of_scope", "refusal_kind": "out_of_scope"}
+            return {"chunks": []}
         events = []
         for i, c in enumerate(chunks, start=1):
             c.cid = f"C{i}"
@@ -331,12 +341,12 @@ class AtlasAgent:
             self.repo.log_security_event(event_type="sql_blocked", source="sql_tool",
                                          detail=f"{result['error']} | sql: {(result.get('query') or '')[:400]}",
                                          request_id=s["request_id"], client_id=s["client_id"])
-        return {"sql": result}
+        return {"sql_result": result}
 
     def node_writer(self, s: AgentState) -> dict:
         attempts = s.get("writer_attempts", 0) + 1
         facts, chunks, derived = s.get("facts", []), s.get("chunks", []), s.get("derived", [])
-        sql = s.get("sql")
+        sql = s.get("sql_result")
         if s["route"] == "aggregate" and (not sql or sql.get("error")):
             reason = (sql or {}).get("error") or "no query result"
             return {"draft": f"INSUFFICIENT_EVIDENCE: {reason}", "writer_attempts": attempts}
@@ -360,9 +370,12 @@ class AtlasAgent:
 
     def node_critic(self, s: AgentState) -> dict:
         facts, chunks, derived = s.get("facts", []), s.get("chunks", []), s.get("derived", [])
-        sql = s.get("sql") or {}
+        sql = s.get("sql_result") or {}
+        shown = {f.report_id for f in facts} | {c.report_id for c in chunks}
+        meta = [f"{s['catalog'][r]['title']} {s['catalog'][r]['published']}" for r in shown]
+        meta += [f"{l['title']} {l['published']}" for l in s.get("locked_reports", [])]
         allowed = allowed_numbers(question=s["question"], history=s.get("history", []), facts=facts, chunks=chunks,
-                                  derived=derived, sql_rows=sql.get("rows") or [])
+                                  derived=derived, sql_rows=sql.get("rows") or [], extra_texts=meta)
         valid = {f.fid for f in facts} | {c.cid for c in chunks} | {d["id"] for d in derived}
         if sql.get("rows"):
             valid.add("Q1")
@@ -378,13 +391,13 @@ class AtlasAgent:
             if report.invalid_tags:
                 problems.append(f"these citation tags do not exist: {report.invalid_tags}")
             log_event(logger, "critic_retry", request_id=s["request_id"], **report.as_dict())
-            return {"critic": report.as_dict(), "retry_writer": True, "writer_feedback": "; ".join(problems)}
+            return {"critic_report": report.as_dict(), "retry_writer": True, "writer_feedback": "; ".join(problems)}
 
         sql_ok = bool(sql.get("rows")) if s["route"] == "aggregate" else None
         confidence, reasons = score_confidence(
             route=s["route"], critic=report, facts=facts, chunks=chunks, conflicts=s.get("conflicts", []),
             derived=derived, sql_ok=sql_ok, llm_degraded=degraded, locked_count=len(s.get("locked_reports", [])))
-        out = {"critic": report.as_dict(), "retry_writer": False, "confidence": confidence,
+        out = {"critic_report": report.as_dict(), "retry_writer": False, "confidence": confidence,
                "confidence_reasons": reasons}
         if confidence < self.s.confidence_threshold:
             if report.insufficient:
@@ -393,7 +406,7 @@ class AtlasAgent:
                                             "this reliably.")
             else:
                 out["escalation_kind"] = "low_confidence"
-                out["escalation_detail"] = "; ".join(reasons)
+                out["escalation_detail"] = "; ".join(r for r in reasons if not r.startswith(POSITIVE_REASONS))
         return out
 
     def node_escalate(self, s: AgentState) -> dict:
@@ -442,7 +455,7 @@ class AtlasAgent:
             parts.append("Notes: " + " ".join(s["calc_notes"]))
         parts.append(render.locked_section(s.get("locked_reports", [])))
         if s["route"] == "aggregate":
-            parts.append(render.sql_section((s.get("sql") or {}).get("query")))
+            parts.append(render.sql_section((s.get("sql_result") or {}).get("query")))
         if s["route"] == "comparison" and re.search(r"\b(trust|reliable|recommend|should|better)\b",
                                                      s["question"], re.IGNORECASE):
             parts.append("If you'd like a CMR analyst to review this recommendation, reply \"escalate\" and I'll "
@@ -455,7 +468,7 @@ def build_citations(answer: str, s: AgentState) -> list[dict]:
     facts = {f.fid: f for f in s.get("facts", [])}
     chunks = {c.cid: c for c in s.get("chunks", [])}
     derived = {d["id"]: d for d in s.get("derived", [])}
-    sql = s.get("sql") or {}
+    sql = s.get("sql_result") or {}
     out = []
     for tag in extract_tags(answer):
         if tag in facts:

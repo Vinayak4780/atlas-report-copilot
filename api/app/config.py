@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     request_timeout_s: float = 28.0
     cache_ttl_s: int = 3600
     retrieval_top_k: int = 6
+    # bge-small cosine: off-topic questions score <= 0.50 on this corpus, relevant ones >= 0.66
+    min_relevance: float = 0.58
     sql_row_limit: int = 50
     sql_timeout_ms: int = 2000
     log_level: str = "INFO"
