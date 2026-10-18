@@ -1,0 +1,80 @@
+name: atlas
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: atlas
+      MYSQL_APP_USER: ${MYSQL_APP_USER:-atlas_app}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in .env}
+      MYSQL_RO_USER: ${MYSQL_RO_USER:-atlas_ro}
+      MYSQL_RO_PASSWORD: ${MYSQL_RO_PASSWORD:?set MYSQL_RO_PASSWORD in .env}
+      MYSQL_PORTAL_USER: ${MYSQL_PORTAL_USER:-atlas_portal}
+      MYSQL_PORTAL_PASSWORD: ${MYSQL_PORTAL_PASSWORD:?set MYSQL_PORTAL_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: atlas
+      QDRANT_URL: http://qdrant:6333
+      REPORTS_DIR: /data/reports
+    volumes:
+      - ./data/reports:/data/reports:ro
+      - ./api/eval/results:/app/eval/results
+    depends_on:
+      mysql:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  portal:
+    build: ./portal
+    restart: unless-stopped
+    environment:
+      ATLAS_API_URL: http://api:8000
+      ATLAS_API_KEY: ${ATLAS_API_KEY:?set ATLAS_API_KEY in .env}
+      ATLAS_API_TIMEOUT: "32"
+      PORTAL_BASE_URL: http://localhost:8080
+      PORTAL_DB_HOST: mysql
+      PORTAL_DB_NAME: atlas
+      PORTAL_DB_USER: ${MYSQL_PORTAL_USER:-atlas_portal}
+      PORTAL_DB_PASSWORD: ${MYSQL_PORTAL_PASSWORD:?set MYSQL_PORTAL_PASSWORD in .env}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      api:
+        condition: service_started
+    ports:
+      - "8080:80"
+
+volumes:
+  mysql_data:
+  qdrant_data:
